@@ -1,6 +1,6 @@
 # Time_Load_Dual_Back_calibration
 An open-source implementation of an alternative adaptive calibration procedure for the Tload task, based on the works . Stimulus duration is individualized based on performance accuracy and response times across a rolling 60-trial window, with separate weighting of numerical and letter-target responses.
-
+Code for a Psycopy use.
 
 This repository provides an open-source PsychoPy implementation of an alternative adaptive calibration procedure for the Tload task. The approach is informed by previous work on Tload task calibration, including the work of Borragan et al. (2016) and the more recent contribution of Hrabovecky (2025).
 
