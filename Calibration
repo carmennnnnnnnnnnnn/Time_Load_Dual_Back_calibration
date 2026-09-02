@@ -1,0 +1,1629 @@
+"""
+============================================================
+RT-BASED ADAPTIVE TLOAD CALIBRATION
+============================================================
+
+Alternative procedure for individualizing Tload stimulus
+duration using response time and accuracy.
+
+Experimental design
+-------------------
+- 6 consecutive blocks
+- 60 trials per block
+- 360 trials total
+- No visible transition between blocks
+- Alternating letter / number trials
+
+Adaptive procedure
+------------------
+Initial STD:
+    1400 ms
+
+Adaptation window:
+    60 trials
+
+Accuracy criteria:
+    Accuracy > 85%:
+        STD is adjusted using the weighted mean RT
+
+    Accuracy < 70%:
+        STD is increased by 100 ms
+
+    Accuracy 70-85%:
+        STD remains unchanged
+
+Weighted RT:
+    Number trials = 35%
+    Letter target trials = 65%
+
+RT inclusion criteria
+---------------------
+Included:
+    - Correct number responses
+    - Correct responses to letter targets
+      (1-back repetitions)
+
+Excluded:
+    - Non-target letters
+    - Incorrect responses
+    - Missed responses
+    - False alarms
+
+Output
+------
+Two CSV files are generated:
+
+1. Exhaustive trial-level data
+2. Block-level summary data
+
+Dependencies
+------------
+PsychoPy
+
+Python standard library:
+    random
+    csv
+    os
+
+This script is designed to run directly in
+PsychoPy Coder.
+
+============================================================
+"""
+
+
+# ============================================================
+# 1. IMPORTS
+# ============================================================
+
+try:
+    from psychopy import visual, core, event, gui
+except ImportError:
+    import sys
+
+    print(
+        "\nERROR: PsychoPy is not installed.\n"
+        "Please install PsychoPy before running this experiment.\n"
+    )
+
+    sys.exit(1)
+
+import random
+import csv
+import os
+
+
+# ============================================================
+# 2. EXPERIMENTAL PARAMETERS
+# ============================================================
+
+# ------------------------------------------------------------
+# Experimental structure
+# ------------------------------------------------------------
+
+N_BLOCKS = 6
+
+TRIALS_PER_BLOCK = 60
+
+TOTAL_TRIALS = (
+    N_BLOCKS * TRIALS_PER_BLOCK
+)
+
+
+# ------------------------------------------------------------
+# Adaptive procedure
+# ------------------------------------------------------------
+
+ADAPTATION_WINDOW = 60
+
+
+INITIAL_STD_MS = 1400
+
+MIN_STD_MS = 550
+
+MAX_STD_MS = 2000
+
+
+STD_INCREASE_MS = 100
+
+
+# ------------------------------------------------------------
+# Accuracy thresholds
+# ------------------------------------------------------------
+
+HIGH_ACCURACY_THRESHOLD = 0.85
+
+LOW_ACCURACY_THRESHOLD = 0.70
+
+
+# ------------------------------------------------------------
+# Response-time weighting
+# ------------------------------------------------------------
+
+NUMBER_RT_WEIGHT = 0.35
+
+LETTER_RT_WEIGHT = 0.65
+
+
+# ------------------------------------------------------------
+# 1-back target probability
+# ------------------------------------------------------------
+
+ONE_BACK_PROBABILITY = 0.25
+
+
+# ============================================================
+# 3. STIMULI
+# ============================================================
+
+NUMBERS = [
+    1, 2, 3, 4,
+    6, 7, 8, 9
+]
+
+
+LETTERS = [
+    'A',
+    'C',
+    'E',
+    'L',
+    'N',
+    'P',
+    'R',
+    'T',
+    'U'
+]
+
+
+# ============================================================
+# 4. RESPONSE KEYS
+# ============================================================
+
+KEY_EVEN = 'right'
+
+KEY_ODD = 'left'
+
+KEY_REPEAT = 'space'
+
+
+RESPONSE_KEYS = [
+    KEY_EVEN,
+    KEY_ODD,
+    KEY_REPEAT
+]
+
+
+# ============================================================
+# 5. HELPER FUNCTIONS
+# ============================================================
+
+def clamp(value, minimum, maximum):
+    """
+    Restrict a numerical value between minimum and maximum.
+    """
+
+    return max(
+        minimum,
+        min(value, maximum)
+    )
+
+
+def calculate_weighted_rt(rt_history):
+    """
+    Calculate mean RTs for number and letter-target trials,
+    and the weighted mean RT.
+
+    Parameters
+    ----------
+    rt_history : list of dictionaries
+
+        Each dictionary must contain:
+
+        stimulus_type:
+            'number'
+            or
+            'letter_target'
+
+        rt_ms:
+            response time in milliseconds
+
+    Returns
+    -------
+    mean_number_rt : float or None
+
+    mean_letter_rt : float or None
+
+    weighted_rt : float or None
+    """
+
+    number_rts = []
+
+    letter_rts = []
+
+
+    # --------------------------------------------------------
+    # Separate RTs by stimulus type
+    # --------------------------------------------------------
+
+    for trial in rt_history:
+
+        if trial['stimulus_type'] == 'number':
+
+            number_rts.append(
+                trial['rt_ms']
+            )
+
+        elif trial['stimulus_type'] == 'letter_target':
+
+            letter_rts.append(
+                trial['rt_ms']
+            )
+
+
+    # --------------------------------------------------------
+    # Mean number RT
+    # --------------------------------------------------------
+
+    if number_rts:
+
+        mean_number_rt = (
+            sum(number_rts)
+            /
+            len(number_rts)
+        )
+
+    else:
+
+        mean_number_rt = None
+
+
+    # --------------------------------------------------------
+    # Mean letter-target RT
+    # --------------------------------------------------------
+
+    if letter_rts:
+
+        mean_letter_rt = (
+            sum(letter_rts)
+            /
+            len(letter_rts)
+        )
+
+    else:
+
+        mean_letter_rt = None
+
+
+    # --------------------------------------------------------
+    # Weighted mean RT
+    #
+    # 35% numbers
+    # 65% letter targets
+    # --------------------------------------------------------
+
+    if (
+        mean_number_rt is not None
+        and
+        mean_letter_rt is not None
+    ):
+
+        weighted_rt = (
+            NUMBER_RT_WEIGHT
+            *
+            mean_number_rt
+            +
+            LETTER_RT_WEIGHT
+            *
+            mean_letter_rt
+        )
+
+    elif mean_number_rt is not None:
+
+        # Safety fallback
+        weighted_rt = mean_number_rt
+
+    elif mean_letter_rt is not None:
+
+        # Safety fallback
+        weighted_rt = mean_letter_rt
+
+    else:
+
+        weighted_rt = None
+
+
+    return (
+        mean_number_rt,
+        mean_letter_rt,
+        weighted_rt
+    )
+
+
+def safe_csv_value(value, decimals=2):
+    """
+    Convert numerical values to CSV-friendly strings.
+
+    None values are exported as empty cells.
+    """
+
+    if value is None:
+
+        return ''
+
+    return f'{value:.{decimals}f}'
+
+
+# ============================================================
+# 6. PARTICIPANT IDENTIFICATION
+# ============================================================
+
+exp_info = {
+    'participant_id': ''
+}
+
+
+dialog = gui.DlgFromDict(
+    dictionary=exp_info,
+    title='RT-Based Adaptive Tload Calibration'
+)
+
+
+if not dialog.OK:
+
+    core.quit()
+
+
+participant_id = str(
+    exp_info['participant_id']
+)
+
+
+# ------------------------------------------------------------
+# Sanitize participant ID for filenames
+# ------------------------------------------------------------
+
+safe_participant_id = (
+    participant_id
+    .replace(
+        os.sep,
+        '_'
+    )
+    .replace(
+        ' ',
+        '_'
+    )
+)
+
+
+# ============================================================
+# 7. OUTPUT FILENAMES
+# ============================================================
+
+exhaustive_filename = (
+    f'tload_adaptive_'
+    f'{safe_participant_id}_'
+    f'exhaustive.csv'
+)
+
+
+block_filename = (
+    f'tload_adaptive_'
+    f'{safe_participant_id}_'
+    f'blocks.csv'
+)
+
+
+# ============================================================
+# 8. OPEN OUTPUT FILES
+# ============================================================
+
+data_file = open(
+    exhaustive_filename,
+    'w',
+    newline='',
+    encoding='utf-8'
+)
+
+
+block_file = open(
+    block_filename,
+    'w',
+    newline='',
+    encoding='utf-8'
+)
+
+
+csv_writer = csv.writer(
+    data_file
+)
+
+
+block_writer = csv.writer(
+    block_file
+)
+
+
+# ============================================================
+# 9. EXHAUSTIVE CSV HEADER
+# ============================================================
+
+exhaustive_header = [
+
+    'participant_id',
+
+    'block',
+
+    'trial_in_block',
+
+    'global_trial_index',
+
+    'time_sec_from_start',
+
+    'stimulus_type',
+
+    'stimulus',
+
+    'is_letter_target',
+
+    'correct_response',
+
+    'key_pressed',
+
+    'correct',
+
+    'rt_sec',
+
+    'rt_ms',
+
+    'STD_ms',
+
+    'window_accuracy',
+
+    'window_n_trials',
+
+    'window_n_correct',
+
+    'window_mean_rt_numbers_ms',
+
+    'window_mean_rt_letters_ms',
+
+    'window_weighted_mean_rt_ms',
+
+    'adaptation_applied'
+
+]
+
+
+csv_writer.writerow(
+    exhaustive_header
+)
+
+
+# ============================================================
+# 10. BLOCK SUMMARY CSV HEADER
+# ============================================================
+
+block_header = [
+
+    'participant_id',
+
+    'block',
+
+    'n_trials',
+
+    'n_correct',
+
+    'accuracy',
+
+    'n_number_trials',
+
+    'n_number_correct',
+
+    'number_accuracy',
+
+    'n_letter_trials',
+
+    'n_letter_targets',
+
+    'n_letter_targets_correct',
+
+    'mean_rt_numbers_ms',
+
+    'mean_rt_letters_ms',
+
+    'weighted_mean_rt_ms',
+
+    'STD_start_ms',
+
+    'STD_end_ms',
+
+    'adaptation'
+
+]
+
+
+block_writer.writerow(
+    block_header
+)
+
+
+# ============================================================
+# 11. PSYCHOPY WINDOW
+# ============================================================
+
+win = visual.Window(
+
+    size=[1024, 768],
+
+    fullscr=True,
+
+    screen=0,
+
+    winType='pyglet',
+
+    allowGUI=False,
+
+    allowStencil=False,
+
+    monitor='testMonitor',
+
+    color=[0, 0, 0],
+
+    colorSpace='rgb',
+
+    blendMode='avg',
+
+    useFBO=True,
+
+    units='height'
+
+)
+
+
+win.mouseVisible = False
+
+
+# ============================================================
+# 12. VISUAL STIMULI
+# ============================================================
+
+stim_text = visual.TextStim(
+
+    win=win,
+
+    name='stimulus',
+
+    text='',
+
+    font='Arial',
+
+    pos=(0, 0),
+
+    height=0.15,
+
+    color='white',
+
+    colorSpace='rgb'
+
+)
+
+
+instruction_text = visual.TextStim(
+
+    win=win,
+
+    text="""Bienvenue dans cette tâche.
+
+Vous allez voir une séquence alternant lettres et chiffres.
+
+TÂCHE CHIFFRES :
+
+- Si le chiffre est PAIR,
+  appuyez sur la flèche DROITE.
+
+- Si le chiffre est IMPAIR,
+  appuyez sur la flèche GAUCHE.
+
+
+TÂCHE LETTRES :
+
+- Si la lettre actuelle est la MÊME
+  que la lettre précédente,
+  appuyez sur ESPACE.
+
+- Sinon, ne faites rien.
+
+
+Essayez d'être à la fois RAPIDE et PRÉCIS.
+
+La difficulté s'ajustera automatiquement
+en fonction de vos performances.
+
+
+Appuyez sur ESPACE pour commencer.""",
+
+    font='Arial',
+
+    pos=(0, 0),
+
+    height=0.04,
+
+    wrapWidth=1.4,
+
+    color='white'
+
+)
+
+
+end_text = visual.TextStim(
+
+    win=win,
+
+    text="""Fin de la tâche.
+
+Merci.""",
+
+    font='Arial',
+
+    height=0.05,
+
+    color='white'
+
+)
+
+
+# ============================================================
+# 13. INITIAL INSTRUCTIONS
+# ============================================================
+
+instruction_text.draw()
+
+win.flip()
+
+
+keys = event.waitKeys(
+    keyList=[
+        'space',
+        'escape'
+    ]
+)
+
+
+if 'escape' in keys:
+
+    data_file.close()
+
+    block_file.close()
+
+    win.close()
+
+    core.quit()
+
+
+# ============================================================
+# 14. INITIALIZE EXPERIMENT STATE
+# ============================================================
+
+# Current stimulus duration
+current_std_ms = INITIAL_STD_MS
+
+
+# Previous letter for 1-back task
+previous_letter = None
+
+
+# Alternate letter / number trials
+is_letter_trial = True
+
+
+# Global trial counter
+global_trial_index = 0
+
+
+# Global experiment clock
+global_clock = core.Clock()
+
+
+# ------------------------------------------------------------
+# Adaptive history
+# ------------------------------------------------------------
+
+# Contains 0/1 for the last 60 trials
+accuracy_history = []
+
+
+# Contains only correct RT trials requiring a response
+#
+# Included:
+#   correct number trials
+#   correct letter-target trials
+#
+# Excluded:
+#   non-target letters
+#   errors
+#   omissions
+#   false alarms
+#
+rt_history = []
+
+
+# ============================================================
+# 15. MAIN EXPERIMENT
+# ============================================================
+
+for block_number in range(
+    1,
+    N_BLOCKS + 1
+):
+
+
+    # ========================================================
+    # BLOCK INITIALIZATION
+    # ========================================================
+
+    block_std_start_ms = current_std_ms
+
+
+    block_correct = 0
+
+
+    block_number_trials = 0
+
+    block_number_correct = 0
+
+
+    block_letter_trials = 0
+
+    block_letter_targets = 0
+
+    block_letter_targets_correct = 0
+
+
+    block_number_rts = []
+
+    block_letter_rts = []
+
+
+    block_adaptation = 'none'
+
+
+    # ========================================================
+    # TRIAL LOOP
+    # ========================================================
+
+    for trial_in_block in range(
+        1,
+        TRIALS_PER_BLOCK + 1
+    ):
+
+
+        global_trial_index += 1
+
+
+        trial_start_time = (
+            global_clock.getTime()
+        )
+
+
+        # ----------------------------------------------------
+        # Initialize trial variables
+        # ----------------------------------------------------
+
+        current_stim = None
+
+        stimulus_type = ''
+
+        is_target = ''
+
+        correct_response = ''
+
+
+        # ====================================================
+        # LETTER TRIAL
+        # ====================================================
+
+        if is_letter_trial:
+
+            stimulus_type = 'letter'
+
+            block_letter_trials += 1
+
+
+            should_match = False
+
+
+            # ------------------------------------------------
+            # Determine whether current letter is a target
+            # ------------------------------------------------
+
+            if previous_letter is not None:
+
+                if (
+                    random.random()
+                    <
+                    ONE_BACK_PROBABILITY
+                ):
+
+                    should_match = True
+
+
+            # ------------------------------------------------
+            # Target letter
+            # ------------------------------------------------
+
+            if should_match:
+
+                current_stim = previous_letter
+
+                is_target = True
+
+                correct_response = KEY_REPEAT
+
+                block_letter_targets += 1
+
+
+            # ------------------------------------------------
+            # Non-target letter
+            # ------------------------------------------------
+
+            else:
+
+                choices = [
+                    letter
+                    for letter in LETTERS
+                    if letter != previous_letter
+                ]
+
+
+                current_stim = random.choice(
+                    choices
+                )
+
+
+                is_target = False
+
+                correct_response = 'none'
+
+
+            # Update previous letter
+            previous_letter = current_stim
+
+
+        # ====================================================
+        # NUMBER TRIAL
+        # ====================================================
+
+        else:
+
+            stimulus_type = 'number'
+
+            block_number_trials += 1
+
+
+            current_stim = random.choice(
+                NUMBERS
+            )
+
+
+            is_target = ''
+
+
+            if current_stim % 2 == 0:
+
+                correct_response = KEY_EVEN
+
+            else:
+
+                correct_response = KEY_ODD
+
+
+        # ====================================================
+        # DISPLAY STIMULUS
+        # ====================================================
+
+        stim_text.text = str(
+            current_stim
+        )
+
+        stim_text.draw()
+
+        win.flip()
+
+
+        # ====================================================
+        # RESPONSE COLLECTION
+        # ====================================================
+
+        trial_clock = core.Clock()
+
+
+        response_key = 'none'
+
+        response_rt_sec = None
+
+        key_pressed_detected = False
+
+
+        while (
+            trial_clock.getTime()
+            <
+            current_std_ms / 1000.0
+        ):
+
+
+            # ------------------------------------------------
+            # Escape
+            # ------------------------------------------------
+
+            if event.getKeys(
+                keyList=['escape']
+            ):
+
+                data_file.close()
+
+                block_file.close()
+
+                win.close()
+
+                core.quit()
+
+
+            # ------------------------------------------------
+            # Response
+            # ------------------------------------------------
+
+            if not key_pressed_detected:
+
+                keys = event.getKeys(
+
+                    keyList=RESPONSE_KEYS,
+
+                    timeStamped=trial_clock
+
+                )
+
+
+                if keys:
+
+                    key, timestamp = keys[0]
+
+
+                    response_key = key
+
+                    response_rt_sec = timestamp
+
+                    key_pressed_detected = True
+
+
+        # ====================================================
+        # DETERMINE CORRECTNESS
+        # ====================================================
+
+        is_correct = False
+
+
+        # ----------------------------------------------------
+        # Number trial
+        # ----------------------------------------------------
+
+        if stimulus_type == 'number':
+
+            if (
+                response_key
+                ==
+                correct_response
+            ):
+
+                is_correct = True
+
+                block_number_correct += 1
+
+
+        # ----------------------------------------------------
+        # Letter trial
+        # ----------------------------------------------------
+
+        elif stimulus_type == 'letter':
+
+
+            # ------------------------------------------------
+            # Target
+            # ------------------------------------------------
+
+            if is_target:
+
+                if response_key == KEY_REPEAT:
+
+                    is_correct = True
+
+                    block_letter_targets_correct += 1
+
+
+            # ------------------------------------------------
+            # Non-target
+            # ------------------------------------------------
+
+            else:
+
+                if response_key == 'none':
+
+                    is_correct = True
+
+
+        # ----------------------------------------------------
+        # Block-level correct count
+        # ----------------------------------------------------
+
+        if is_correct:
+
+            block_correct += 1
+
+
+        # ====================================================
+        # RESPONSE TIME
+        # ====================================================
+
+        rt_ms = None
+
+
+        if response_rt_sec is not None:
+
+            rt_ms = (
+                response_rt_sec
+                *
+                1000.0
+            )
+
+
+        # ====================================================
+        # UPDATE ACCURACY HISTORY
+        # ====================================================
+
+        accuracy_history.append(
+
+            1
+            if is_correct
+            else
+            0
+
+        )
+
+
+        if (
+            len(accuracy_history)
+            >
+            ADAPTATION_WINDOW
+        ):
+
+            accuracy_history.pop(0)
+
+
+        # ====================================================
+        # UPDATE RT HISTORY
+        # ====================================================
+
+        # Only correct trials requiring an actual response
+        # enter the RT adaptation calculation.
+
+        if (
+            is_correct
+            and
+            rt_ms is not None
+        ):
+
+
+            # ------------------------------------------------
+            # Correct number
+            # ------------------------------------------------
+
+            if stimulus_type == 'number':
+
+                rt_history.append({
+
+                    'stimulus_type':
+                        'number',
+
+                    'rt_ms':
+                        rt_ms
+
+                })
+
+
+                block_number_rts.append(
+                    rt_ms
+                )
+
+
+            # ------------------------------------------------
+            # Correct letter target
+            # ------------------------------------------------
+
+            elif (
+                stimulus_type == 'letter'
+                and
+                is_target
+            ):
+
+                rt_history.append({
+
+                    'stimulus_type':
+                        'letter_target',
+
+                    'rt_ms':
+                        rt_ms
+
+                })
+
+
+                block_letter_rts.append(
+                    rt_ms
+                )
+
+
+        # ====================================================
+        # CALCULATE WINDOW ACCURACY
+        # ====================================================
+
+        window_n_trials = len(
+            accuracy_history
+        )
+
+
+        window_n_correct = sum(
+            accuracy_history
+        )
+
+
+        window_accuracy = (
+
+            window_n_correct
+            /
+            window_n_trials
+
+        )
+
+
+        # ====================================================
+        # CALCULATE WINDOW RT
+        # ====================================================
+
+        (
+            window_mean_number_rt,
+            window_mean_letter_rt,
+            window_weighted_mean_rt
+
+        ) = calculate_weighted_rt(
+            rt_history
+        )
+
+
+        # ====================================================
+        # ADAPTATION
+        # ====================================================
+
+        adaptation_applied = 'none'
+
+
+        # ----------------------------------------------------
+        # Adaptation occurs after every 60 trials
+        # ----------------------------------------------------
+
+        if (
+            global_trial_index
+            %
+            ADAPTATION_WINDOW
+            ==
+            0
+        ):
+
+
+            # =================================================
+            # LOW ACCURACY
+            # =================================================
+
+            if (
+                window_accuracy
+                <
+                LOW_ACCURACY_THRESHOLD
+            ):
+
+
+                current_std_ms += (
+                    STD_INCREASE_MS
+                )
+
+
+                current_std_ms = clamp(
+
+                    current_std_ms,
+
+                    MIN_STD_MS,
+
+                    MAX_STD_MS
+
+                )
+
+
+                adaptation_applied = (
+                    'increase_100ms'
+                )
+
+
+                block_adaptation = (
+                    'increase_100ms'
+                )
+
+
+            # =================================================
+            # HIGH ACCURACY
+            # =================================================
+
+            elif (
+                window_accuracy
+                >
+                HIGH_ACCURACY_THRESHOLD
+                and
+                window_weighted_mean_rt
+                is not None
+            ):
+
+
+                current_std_ms = clamp(
+
+                    window_weighted_mean_rt,
+
+                    MIN_STD_MS,
+
+                    MAX_STD_MS
+
+                )
+
+
+                adaptation_applied = (
+                    'STD_set_to_weighted_RT'
+                )
+
+
+                block_adaptation = (
+                    'STD_set_to_weighted_RT'
+                )
+
+
+            # =================================================
+            # INTERMEDIATE ACCURACY
+            # =================================================
+
+            else:
+
+                adaptation_applied = (
+                    'no_change'
+                )
+
+
+                block_adaptation = (
+                    'no_change'
+                )
+
+
+        # ====================================================
+        # FORMAT CSV VALUES
+        # ====================================================
+
+        rt_sec_csv = safe_csv_value(
+            response_rt_sec,
+            4
+        )
+
+
+        rt_ms_csv = safe_csv_value(
+            rt_ms,
+            2
+        )
+
+
+        number_rt_csv = safe_csv_value(
+            window_mean_number_rt,
+            2
+        )
+
+
+        letter_rt_csv = safe_csv_value(
+            window_mean_letter_rt,
+            2
+        )
+
+
+        weighted_rt_csv = safe_csv_value(
+            window_weighted_mean_rt,
+            2
+        )
+
+
+        # ====================================================
+        # WRITE EXHAUSTIVE TRIAL DATA
+        # ====================================================
+
+        csv_writer.writerow([
+
+            participant_id,
+
+            block_number,
+
+            trial_in_block,
+
+            global_trial_index,
+
+            f'{trial_start_time:.4f}',
+
+            stimulus_type,
+
+            current_stim,
+
+            is_target,
+
+            correct_response,
+
+            response_key,
+
+            is_correct,
+
+            rt_sec_csv,
+
+            rt_ms_csv,
+
+            f'{current_std_ms:.2f}',
+
+            f'{window_accuracy:.4f}',
+
+            window_n_trials,
+
+            window_n_correct,
+
+            number_rt_csv,
+
+            letter_rt_csv,
+
+            weighted_rt_csv,
+
+            adaptation_applied
+
+        ])
+
+
+        # ----------------------------------------------------
+        # Alternate stimulus type
+        # ----------------------------------------------------
+
+        is_letter_trial = (
+            not is_letter_trial
+        )
+
+
+        event.clearEvents()
+
+
+    # ========================================================
+    # END OF BLOCK
+    # ========================================================
+
+    # No screen is displayed here.
+    #
+    # The next block starts immediately.
+    #
+    # The participant therefore cannot identify
+    # the transition between blocks.
+
+
+    # ========================================================
+    # BLOCK STATISTICS
+    # ========================================================
+
+    block_accuracy = (
+
+        block_correct
+        /
+        TRIALS_PER_BLOCK
+
+    )
+
+
+    # --------------------------------------------------------
+    # Number accuracy
+    # --------------------------------------------------------
+
+    if block_number_trials > 0:
+
+        block_number_accuracy = (
+
+            block_number_correct
+            /
+            block_number_trials
+
+        )
+
+    else:
+
+        block_number_accuracy = None
+
+
+    # --------------------------------------------------------
+    # Letter target accuracy
+    # --------------------------------------------------------
+
+    if block_letter_targets > 0:
+
+        block_letter_target_accuracy = (
+
+            block_letter_targets_correct
+            /
+            block_letter_targets
+
+        )
+
+    else:
+
+        block_letter_target_accuracy = None
+
+
+    # --------------------------------------------------------
+    # Mean number RT
+    # --------------------------------------------------------
+
+    if block_number_rts:
+
+        block_mean_number_rt = (
+
+            sum(block_number_rts)
+            /
+            len(block_number_rts)
+
+        )
+
+    else:
+
+        block_mean_number_rt = None
+
+
+    # --------------------------------------------------------
+    # Mean letter RT
+    # --------------------------------------------------------
+
+    if block_letter_rts:
+
+        block_mean_letter_rt = (
+
+            sum(block_letter_rts)
+            /
+            len(block_letter_rts)
+
+        )
+
+    else:
+
+        block_mean_letter_rt = None
+
+
+    # --------------------------------------------------------
+    # Weighted block RT
+    # --------------------------------------------------------
+
+    if (
+        block_mean_number_rt is not None
+        and
+        block_mean_letter_rt is not None
+    ):
+
+        block_weighted_rt = (
+
+            NUMBER_RT_WEIGHT
+            *
+            block_mean_number_rt
+
+            +
+
+            LETTER_RT_WEIGHT
+            *
+            block_mean_letter_rt
+
+        )
+
+    elif block_mean_number_rt is not None:
+
+        block_weighted_rt = (
+            block_mean_number_rt
+        )
+
+    elif block_mean_letter_rt is not None:
+
+        block_weighted_rt = (
+            block_mean_letter_rt
+        )
+
+    else:
+
+        block_weighted_rt = None
+
+
+    # ========================================================
+    # WRITE BLOCK SUMMARY
+    # ========================================================
+
+    block_writer.writerow([
+
+        participant_id,
+
+        block_number,
+
+        TRIALS_PER_BLOCK,
+
+        block_correct,
+
+        f'{block_accuracy:.4f}',
+
+        block_number_trials,
+
+        block_number_correct,
+
+        safe_csv_value(
+            block_number_accuracy,
+            4
+        ),
+
+        block_letter_trials,
+
+        block_letter_targets,
+
+        block_letter_targets_correct,
+
+        safe_csv_value(
+            block_mean_number_rt,
+            2
+        ),
+
+        safe_csv_value(
+            block_mean_letter_rt,
+            2
+        ),
+
+        safe_csv_value(
+            block_weighted_rt,
+            2
+        ),
+
+        f'{block_std_start_ms:.2f}',
+
+        f'{current_std_ms:.2f}',
+
+        block_adaptation
+
+    ])
+
+
+# ============================================================
+# 16. END SCREEN
+# ============================================================
+
+end_text.draw()
+
+win.flip()
+
+
+event.waitKeys(
+    keyList=[
+        'space',
+        'escape'
+    ]
+)
+
+
+# ============================================================
+# 17. CLOSE FILES AND WINDOW
+# ============================================================
+
+data_file.close()
+
+block_file.close()
+
+win.close()
+
+core.quit()
